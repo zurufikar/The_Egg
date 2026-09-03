@@ -13,23 +13,33 @@ const getLastSessionData = (logs, exName) => {
   return null;
 };
 
-export default function WorkoutSession({ activeTemplate, setView, fetchTemplates, fetchLogs, logs = [] }) {
-  const [time, setTime] = useState(0);
-  const [restTimer, setRestTimer] = useState(null); 
-  const [restTotal, setRestTotal] = useState(90);
+export default function WorkoutSession({ activeTemplate, setView, fetchTemplates, fetchLogs, logs, session }) {
+  // 1. Key LocalStorage Unik
+  const STORAGE_KEY = `active_workout_${activeTemplate?.id || 'session'}`;
+  const REST_STORAGE_KEY = `active_rest_${activeTemplate?.id || 'session'}`;
+
   const [isSaving, setIsSaving] = useState(false);
 
-  // Inisialisasi state: Otomatis memuat data sesi sebelumnya jika ada
+  // 2. Inisialisasi State WorkoutData (Restore dari LocalStorage atau buat baru)
   const [workoutData, setWorkoutData] = useState(() => {
-    if (!activeTemplate) return { id: null, name: 'Latihan', exercises: [] };
-    
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch (e) {
+        console.error("Gagal memuat sesi tersimpan:", e);
+      }
+    }
+
+    if (!activeTemplate) return { id: null, name: 'Latihan', exercises: [], startTime: Date.now() };
+
     return {
       ...activeTemplate,
+      startTime: Date.now(), // Timestamp waktu mulai latihan
       exercises: (activeTemplate.exercises || []).map(ex => {
         const lastSessionEx = getLastSessionData(logs, ex.name);
         const prevLogs = lastSessionEx?.logs_detail;
 
-        // Otomatis isi dari sesi lalu jika data riwayat detail ditemukan
         if (prevLogs && prevLogs.length > 0) {
           return {
             ...ex,
@@ -44,7 +54,6 @@ export default function WorkoutSession({ activeTemplate, setView, fetchTemplates
           };
         }
 
-        // Fallback jika gerakan belum pernah dicatat sebelumnya
         const defaultSets = ex.sets || 3;
         return {
           ...ex,
@@ -61,11 +70,42 @@ export default function WorkoutSession({ activeTemplate, setView, fetchTemplates
     };
   });
 
-  // State untuk Modal Tambah Exercise On-The-Fly
-  const [showAddExModal, setShowAddExModal] = useState(false);
-  const [newExNameInput, setNewExNameInput] = useState('');
-  const [newExSetsInput, setNewExSetsInput] = useState(3);
-  const [newExRepsInput, setNewExRepsInput] = useState('8-10');
+  // Auto-Save WorkoutData ke LocalStorage
+  useEffect(() => {
+    if (workoutData) {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(workoutData));
+    }
+  }, [workoutData, STORAGE_KEY]);
+
+  // 3. Timer Durasi Latihan (Berbasis Timestamp - Tahan Refresh)
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+
+  useEffect(() => {
+    if (!workoutData?.startTime) return;
+
+    const updateTimer = () => {
+      const now = Date.now();
+      const diff = Math.floor((now - workoutData.startTime) / 1000);
+      setElapsedSeconds(diff > 0 ? diff : 0);
+    };
+
+    updateTimer();
+    const interval = setInterval(updateTimer, 1000);
+    return () => clearInterval(interval);
+  }, [workoutData?.startTime]);
+
+  const formatTime = (sec) => {
+    const mins = Math.floor(sec / 60).toString().padStart(2, '0');
+    const secs = (sec % 60).toString().padStart(2, '0');
+    return `${mins}:${secs}`;
+  };
+
+  // 4. Rest Timer (Berbasis Timestamp - Tahan Refresh)
+  const [restEndTime, setRestEndTime] = useState(() => {
+    const saved = localStorage.getItem(REST_STORAGE_KEY);
+    return saved ? Number(saved) : null;
+  });
+  const [restRemaining, setRestRemaining] = useState(null);
 
   const playTimerAlert = () => {
     if ("vibrate" in navigator) navigator.vibrate([200, 100, 200, 100, 300]);
@@ -73,26 +113,70 @@ export default function WorkoutSession({ activeTemplate, setView, fetchTemplates
       const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
       const osc1 = audioCtx.createOscillator();
       const gain1 = audioCtx.createGain();
-      osc1.type = 'sine'; osc1.frequency.setValueAtTime(880, audioCtx.currentTime);
-      gain1.gain.setValueAtTime(0.2, audioCtx.currentTime); osc1.connect(gain1); gain1.connect(audioCtx.destination);
-      osc1.start(); osc1.stop(audioCtx.currentTime + 0.2);
-    } catch (e) { console.log("Audio error:", e); }
+      osc1.type = 'sine'; 
+      osc1.frequency.setValueAtTime(880, audioCtx.currentTime);
+      gain1.gain.setValueAtTime(0.2, audioCtx.currentTime); 
+      osc1.connect(gain1); 
+      gain1.connect(audioCtx.destination);
+      osc1.start(); 
+      osc1.stop(audioCtx.currentTime + 0.2);
+    } catch (e) { 
+      console.log("Audio error:", e); 
+    }
   };
 
   useEffect(() => {
-    const interval = setInterval(() => {
-      setTime(t => t + 1);
-      setRestTimer(r => {
-        if (r === null) return null;
-        if (r <= 1) { playTimerAlert(); return null; }
-        return r - 1;
-      });
-    }, 1000);
+    if (!restEndTime) {
+      setRestRemaining(null);
+      return;
+    }
+
+    const updateRest = () => {
+      const now = Date.now();
+      const remaining = Math.ceil((restEndTime - now) / 1000);
+
+      if (remaining <= 0) {
+        setRestRemaining(null);
+        setRestEndTime(null);
+        localStorage.removeItem(REST_STORAGE_KEY);
+        playTimerAlert();
+      } else {
+        setRestRemaining(remaining);
+      }
+    };
+
+    updateRest();
+    const interval = setInterval(updateRest, 1000);
     return () => clearInterval(interval);
-  }, []);
+  }, [restEndTime, REST_STORAGE_KEY]);
 
-  const formatTime = (sec) => `${Math.floor(sec / 60).toString().padStart(2, '0')}:${(sec % 60).toString().padStart(2, '0')}`;
+  const startRestTimer = (seconds = 90) => {
+    const targetTime = Date.now() + seconds * 1000;
+    setRestEndTime(targetTime);
+    localStorage.setItem(REST_STORAGE_KEY, targetTime.toString());
+  };
 
+  const cancelRestTimer = () => {
+    setRestEndTime(null);
+    setRestRemaining(null);
+    localStorage.removeItem(REST_STORAGE_KEY);
+  };
+
+  // State Modal Tambah Exercise
+  const [showAddExModal, setShowAddExModal] = useState(false);
+  const [newExNameInput, setNewExNameInput] = useState('');
+  const [newExSetsInput, setNewExSetsInput] = useState(3);
+  const [newExRepsInput, setNewExRepsInput] = useState('8-10');
+
+  // Helper Pembersih Semua Cache Sesi
+  const clearAllCache = () => {
+    localStorage.removeItem(STORAGE_KEY);
+    localStorage.removeItem(REST_STORAGE_KEY);
+    localStorage.removeItem('app_current_view');
+    localStorage.removeItem('app_active_template');
+  };
+
+  // Toggle Checkbox Set
   const handleToggleSet = (exIdx, setIdx) => {
     const newData = { ...workoutData };
     const targetSet = newData.exercises[exIdx].logs[setIdx];
@@ -101,10 +185,9 @@ export default function WorkoutSession({ activeTemplate, setView, fetchTemplates
 
     if (targetSet.done) {
       const customRest = newData.exercises[exIdx].rest_time || 90;
-      setRestTotal(customRest);
-      setRestTimer(customRest);
+      startRestTimer(customRest);
     } else {
-      setRestTimer(null);
+      cancelRestTimer();
     }
   };
 
@@ -114,7 +197,6 @@ export default function WorkoutSession({ activeTemplate, setView, fetchTemplates
     setWorkoutData(newData);
   };
 
-  // --- FITUR: TAMBAH / HAPUS SET ON-THE-FLY ---
   const handleAddSet = (exIdx) => {
     const newData = { ...workoutData };
     const ex = newData.exercises[exIdx];
@@ -134,7 +216,6 @@ export default function WorkoutSession({ activeTemplate, setView, fetchTemplates
     }
   };
 
-  // --- FITUR: TAMBAH / HAPUS EXERCISE CARD ON-THE-FLY ---
   const handleAddExerciseCard = (e) => {
     e.preventDefault();
     if (!newExNameInput.trim()) return alert("Nama gerakan wajib diisi!");
@@ -175,7 +256,7 @@ export default function WorkoutSession({ activeTemplate, setView, fetchTemplates
 
   // --- SIMPAN HASIL LATIHAN ---
   const handleFinish = async () => {
-    const totalDuration = formatTime(time);
+    const totalDuration = formatTime(elapsedSeconds);
     if (window.confirm(`Selesaikan latihan? Waktu: ${totalDuration}`)) {
       setIsSaving(true);
       
@@ -215,9 +296,20 @@ export default function WorkoutSession({ activeTemplate, setView, fetchTemplates
 
       setIsSaving(false); 
       alert(`Selesai! Latihan berhasil disimpan.`); 
+      
+      // Clear cache & pindah halaman
+      clearAllCache();
       await fetchTemplates(); 
       await fetchLogs(); 
-      setView('stats');
+      setView('history');
+    }
+  };
+
+  // --- BATALKAN LATIHAN ---
+  const handleCancelWorkout = () => {
+    if (window.confirm('Batalkan sesi latihan ini?')) {
+      clearAllCache();
+      setView('home');
     }
   };
 
@@ -227,7 +319,7 @@ export default function WorkoutSession({ activeTemplate, setView, fetchTemplates
       <div className="sticky top-0 bg-gray-900/95 backdrop-blur py-3 mb-4 flex justify-between items-center border-b border-gray-800 z-10">
         <div>
           <h1 className="text-xl font-bold">{workoutData.name}</h1>
-          <div className="text-blue-400 font-mono text-sm">⏱ {formatTime(time)}</div>
+          <div className="text-blue-400 font-mono text-sm">⏱ {formatTime(elapsedSeconds)}</div>
         </div>
         <button onClick={handleFinish} disabled={isSaving} className="bg-green-600 hover:bg-green-500 text-white font-bold px-4 py-2 rounded-lg text-sm shadow">
           {isSaving ? 'Menyimpan...' : 'Selesai'}
@@ -370,7 +462,10 @@ export default function WorkoutSession({ activeTemplate, setView, fetchTemplates
         <button onClick={handleFinish} disabled={isSaving} className="w-full bg-green-600 hover:bg-green-500 text-white font-bold p-4 rounded-xl text-lg shadow-lg">
           ✓ Selesai Latihan
         </button>
-        <button className="w-full bg-red-950/40 border border-red-900/50 text-red-400 font-bold p-3 rounded-xl text-sm hover:bg-red-900/40" onClick={() => { if(window.confirm('Batalkan sesi latihan ini?')) setView('home'); }}>
+        <button 
+          className="w-full bg-red-950/40 border border-red-900/50 text-red-400 font-bold p-3 rounded-xl text-sm hover:bg-red-900/40" 
+          onClick={handleCancelWorkout} 
+        >
           Batalkan Latihan
         </button>
       </div>
@@ -425,23 +520,23 @@ export default function WorkoutSession({ activeTemplate, setView, fetchTemplates
       )}
 
       {/* Rest Timer Floating Bar */}
-      {restTimer !== null && (
+      {restRemaining !== null && (
          <div className="fixed bottom-0 left-0 right-0 bg-blue-950 border-t-2 border-blue-500 p-4 z-50 rounded-t-3xl shadow-2xl text-center text-white max-w-md mx-auto">
             <div className="flex justify-between items-center mb-1 px-2">
               <span className="text-xs text-blue-300 font-bold tracking-wider">REST TIMER</span>
-              <button onClick={() => setRestTimer(null)} className="text-xs bg-blue-900 px-2 py-0.5 rounded text-gray-300 hover:text-white">Skip</button>
+              <button onClick={cancelRestTimer} className="text-xs bg-blue-900 px-2 py-0.5 rounded text-gray-300 hover:text-white">Skip</button>
             </div>
             
-            <p className="text-4xl font-extrabold font-mono my-1 tracking-tight text-yellow-400">{formatTime(restTimer)}</p>
+            <p className="text-4xl font-extrabold font-mono my-1 tracking-tight text-yellow-400">{formatTime(restRemaining)}</p>
             
             <div className="flex justify-center gap-3 mt-3">
               <button 
-                onClick={() => setRestTimer(r => Math.max(0, r - 30))} 
+                onClick={() => startRestTimer(Math.max(0, restRemaining - 30))} 
                 className="bg-blue-900/80 hover:bg-blue-800 border border-blue-700 px-4 py-1.5 rounded-lg text-xs font-bold">
                 -30s
               </button>
               <button 
-                onClick={() => setRestTimer(r => r + 30)} 
+                onClick={() => startRestTimer(restRemaining + 30)} 
                 className="bg-blue-900/80 hover:bg-blue-800 border border-blue-700 px-4 py-1.5 rounded-lg text-xs font-bold">
                 +30s
               </button>
